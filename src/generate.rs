@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use codegen::Scope;
 use heck::ToSnekCase;
 use openapiv3::{
-    ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ReferenceOr, Schema,
-    SchemaKind, Type, VariantOrUnknownOrEmpty,
+    ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ObjectType, ReferenceOr,
+    Schema, SchemaKind, Type, VariantOrUnknownOrEmpty,
 };
 
 pub fn generate(
@@ -19,8 +19,18 @@ pub fn generate(
             scope.import(path, name);
         }
     }
-    for (name, schema) in schemas.into_iter() {
-        generate_for_schema(&mut scope, name, schema, derivatives, annotations);
+
+    let schemas_c = schemas.clone();
+
+    for (name, schema) in schemas_c.into_iter() {
+        generate_for_schema(
+            &mut scope,
+            name,
+            schema,
+            schemas.clone(),
+            derivatives,
+            annotations,
+        );
     }
     scope.to_string()
 }
@@ -29,6 +39,7 @@ fn generate_for_schema(
     scope: &mut Scope,
     name: String,
     schema: Schema,
+    schemas: BTreeMap<String, Schema>,
     derivatives: Option<&[&str]>,
     annotations: Option<&[&str]>,
 ) {
@@ -40,8 +51,60 @@ fn generate_for_schema(
         SchemaKind::AnyOf { any_of } => {
             generate_enum(scope, name, any_of, derivatives, annotations)
         }
-        _ => panic!("Does not support 'allOf', 'not' and 'any'"),
+        SchemaKind::AllOf { all_of } => {
+            let final_schema = all_of
+                .into_iter()
+                .map(|r| get_item(r, &schemas).unwrap())
+                .reduce(|mut a, b| {
+                    a.schema_kind = match (a.schema_kind.clone(), b.schema_kind) {
+                        (SchemaKind::Type(t1), SchemaKind::Type(t2)) => {
+                            let ft = match (t1, t2) {
+                                (Type::Object(mut o1), Type::Object(o2)) => {
+                                    o1.properties.extend(o2.properties.into_iter());
+                                    Type::Object(o1)
+                                }
+                                _ => panic!("type not supported for AllOf"),
+                            };
+
+                            SchemaKind::Type(ft)
+                        }
+                        s => panic!("schema kind cannot be resolved: {:?}", s),
+                    };
+
+                    a
+                })
+                .unwrap();
+
+            generate_for_schema(scope, name, final_schema, schemas, derivatives, annotations)
+        }
+        _ => panic!("Does not support 'not' and 'any'"),
     }
+}
+
+fn get_item(r: ReferenceOr<Schema>, schemas: &BTreeMap<String, Schema>) -> Option<Schema> {
+    match r {
+        ReferenceOr::Item(i) => Some(i),
+        ReferenceOr::Reference { reference } => {
+            let reference_type_name = get_item_from_ref(reference);
+
+            schemas.get(&reference_type_name).cloned()
+        }
+    }
+}
+
+fn get_item_from_ref(reference: String) -> String {
+    let mut split = reference.split("/").into_iter().collect::<Vec<_>>();
+    if split[0] != "#" {
+        unreachable!();
+    }
+    if split[1] != "components" {
+        panic!("Trying to load from something other than components");
+    }
+    if split[2] != "schemas" {
+        panic!("Only references to schemas are supported");
+    }
+
+    split.pop().unwrap().to_owned()
 }
 
 fn get_number_type(t: NumberType) -> String {
@@ -77,7 +140,7 @@ fn gen_property_type_for_schema_kind(sk: SchemaKind) -> String {
         Type::String(_) => "String".into(),
         Type::Number(f) => get_number_type(f),
         Type::Integer(f) => get_integer_type(f),
-        Type::Object(_) => todo!(),
+        Type::Object(o) => gen_object_type(o),
         Type::Array(a) => gen_array_type(a),
         Type::Boolean {} => "bool".into(),
     }
@@ -93,6 +156,10 @@ fn get_property_type_from_schema_refor(refor: ReferenceOr<Schema>, is_required: 
     } else {
         format!("Option<{}>", t)
     }
+}
+
+fn gen_object_type(o: ObjectType) -> String {
+    String::new()
 }
 
 fn gen_array_type(a: ArrayType) -> String {
