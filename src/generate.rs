@@ -7,6 +7,7 @@ use openapiv3::{
     Schema, SchemaKind, Type, VariantOrUnknownOrEmpty,
 };
 
+#[derive(Debug)]
 enum Element {
     Struct {
         name: String,
@@ -101,32 +102,44 @@ fn generate_for_schema(
         SchemaKind::Type(r#type) => generate_struct(name, r#type, derives, annotations),
         SchemaKind::OneOf { one_of } => generate_enum(name, one_of, derives, annotations),
         SchemaKind::AnyOf { any_of } => generate_enum(name, any_of, derives, annotations),
-        SchemaKind::AllOf { all_of } => {
-            let final_schema = all_of
-                .into_iter()
-                .map(|r| get_schema(r, &schemas).unwrap())
-                .reduce(|mut a, b| {
-                    a.schema_kind = match (a.schema_kind.clone(), b.schema_kind) {
-                        (SchemaKind::Type(t1), SchemaKind::Type(t2)) => {
-                            let ft = match (t1, t2) {
-                                (Type::Object(mut o1), Type::Object(o2)) => {
-                                    o1.properties.extend(o2.properties.into_iter());
-                                    Type::Object(o1)
-                                }
-                                _ => panic!("type not supported for AllOf"),
-                            };
+        SchemaKind::AllOf { all_of } => all_of
+            .into_iter()
+            .map(|r| get_schema(r, &schemas).unwrap())
+            .map(|s| {
+                generate_for_schema(
+                    name.clone(),
+                    s,
+                    schemas.clone(),
+                    derives.clone(),
+                    annotations.clone(),
+                )
+            })
+            .reduce(|a, b| match (a, b) {
+                (
+                    Element::Struct {
+                        mut fields,
+                        derives,
+                        annotations,
+                        ..
+                    },
+                    Element::Struct {
+                        name,
+                        fields: rfields,
+                        ..
+                    },
+                ) => {
+                    fields.extend(rfields);
 
-                            SchemaKind::Type(ft)
-                        }
-                        s => panic!("schema kind cannot be resolved: {:?}", s),
-                    };
-
-                    a
-                })
-                .unwrap();
-
-            generate_for_schema(name, final_schema, schemas, derives, annotations)
-        }
+                    Element::Struct {
+                        name,
+                        fields,
+                        derives,
+                        annotations,
+                    }
+                }
+                s => panic!("schema kind cannot be resolved: {:?}", s),
+            })
+            .unwrap(),
         _ => panic!("Does not support 'not' and 'any'"),
     }
 }
