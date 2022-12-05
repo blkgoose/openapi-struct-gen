@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use codegen::Scope;
 use heck::ToSnekCase;
@@ -7,11 +7,27 @@ use openapiv3::{
     Schema, SchemaKind, Type, VariantOrUnknownOrEmpty,
 };
 
+enum Element {
+    Struct {
+        name: String,
+        fields: HashMap<String, String>,
+        derives: HashSet<String>,
+        annotations: HashSet<String>,
+    },
+    Enum {
+        name: String,
+        variants: HashSet<String>,
+        derives: HashSet<String>,
+        annotations: HashSet<String>,
+    },
+    Alias(String, String),
+}
+
 pub fn generate(
     schemas: BTreeMap<String, Schema>,
-    derivatives: Option<&[&str]>,
+    derives: HashSet<String>,
     imports: Option<&[(&str, &str)]>,
-    annotations: Option<&[&str]>,
+    annotations: HashSet<String>,
 ) -> String {
     let mut scope = Scope::new();
     if let Some(imports) = imports {
@@ -23,38 +39,72 @@ pub fn generate(
     let schemas_c = schemas.clone();
 
     for (name, schema) in schemas_c.into_iter() {
-        generate_for_schema(
-            &mut scope,
+        match generate_for_schema(
             name,
             schema,
             schemas.clone(),
-            derivatives,
-            annotations,
-        );
+            derives.clone(),
+            annotations.clone(),
+        ) {
+            Element::Struct {
+                name,
+                fields,
+                derives,
+                annotations,
+            } => {
+                let derives = derives.into_iter().collect::<Vec<String>>();
+                scope.raw(&format!("#[derive({})]", derives.join(", ")));
+
+                for annotation in annotations {
+                    scope.raw(&annotation);
+                }
+
+                let s = scope.new_struct(&name).vis("pub");
+                for (fname, ftype) in fields {
+                    s.field(&format!("pub {}", &fname), &ftype);
+                }
+            }
+            Element::Enum {
+                name,
+                variants,
+                derives,
+                annotations,
+            } => {
+                let derives = derives.into_iter().collect::<Vec<String>>();
+                scope.raw(&format!("#[derive({})]", derives.join(", ")));
+
+                for annotation in annotations {
+                    scope.raw(&annotation);
+                }
+
+                let e = scope.new_enum(&name).vis("pub");
+                for variant in variants {
+                    e.new_variant(&variant).tuple(&variant);
+                }
+            }
+            Element::Alias(t, a) => {
+                scope.raw(&format!("pub type {} = {};", t, a));
+            }
+        }
     }
     scope.to_string()
 }
 
 fn generate_for_schema(
-    scope: &mut Scope,
     name: String,
     schema: Schema,
     schemas: BTreeMap<String, Schema>,
-    derivatives: Option<&[&str]>,
-    annotations: Option<&[&str]>,
-) {
+    derives: HashSet<String>,
+    annotations: HashSet<String>,
+) -> Element {
     match schema.schema_kind {
-        SchemaKind::Type(r#type) => generate_struct(scope, name, r#type, derivatives, annotations),
-        SchemaKind::OneOf { one_of } => {
-            generate_enum(scope, name, one_of, derivatives, annotations)
-        }
-        SchemaKind::AnyOf { any_of } => {
-            generate_enum(scope, name, any_of, derivatives, annotations)
-        }
+        SchemaKind::Type(r#type) => generate_struct(name, r#type, derives, annotations),
+        SchemaKind::OneOf { one_of } => generate_enum(name, one_of, derives, annotations),
+        SchemaKind::AnyOf { any_of } => generate_enum(name, any_of, derives, annotations),
         SchemaKind::AllOf { all_of } => {
             let final_schema = all_of
                 .into_iter()
-                .map(|r| get_item(r, &schemas).unwrap())
+                .map(|r| get_schema(r, &schemas).unwrap())
                 .reduce(|mut a, b| {
                     a.schema_kind = match (a.schema_kind.clone(), b.schema_kind) {
                         (SchemaKind::Type(t1), SchemaKind::Type(t2)) => {
@@ -75,13 +125,13 @@ fn generate_for_schema(
                 })
                 .unwrap();
 
-            generate_for_schema(scope, name, final_schema, schemas, derivatives, annotations)
+            generate_for_schema(name, final_schema, schemas, derives, annotations)
         }
         _ => panic!("Does not support 'not' and 'any'"),
     }
 }
 
-fn get_item(r: ReferenceOr<Schema>, schemas: &BTreeMap<String, Schema>) -> Option<Schema> {
+fn get_schema(r: ReferenceOr<Schema>, schemas: &BTreeMap<String, Schema>) -> Option<Schema> {
     match r {
         ReferenceOr::Item(i) => Some(i),
         ReferenceOr::Reference { reference } => {
@@ -158,7 +208,7 @@ fn get_property_type_from_schema_refor(refor: ReferenceOr<Schema>, is_required: 
     }
 }
 
-fn gen_object_type(o: ObjectType) -> String {
+fn gen_object_type(_: ObjectType) -> String {
     String::new()
 }
 
@@ -186,36 +236,35 @@ fn handle_reference(reference: String) -> String {
 }
 
 fn generate_struct(
-    scope: &mut Scope,
     name: String,
     r#type: Type,
-
-    derivatives: Option<&[&str]>,
-    annotations: Option<&[&str]>,
-) {
+    mut derives: HashSet<String>,
+    annotations: HashSet<String>,
+) -> Element {
     match r#type {
         Type::Object(obj) => {
-            let mut derivs = vec!["Debug"];
-            if let Some(derivatives) = derivatives {
-                derivs.extend(derivatives);
-            }
-            scope.raw(&format!("#[derive({})]", derivs.join(", ")));
-            if let Some(annotations) = annotations {
-                for annotation in annotations {
-                    scope.raw(annotation);
-                }
-            }
-            let r#struct = scope.new_struct(&name).vis("pub");
+            derives.insert("Debug".to_owned());
+
+            let mut fields = HashMap::new();
+
             let required = obj.required.into_iter().collect::<HashSet<String>>();
             for (name, refor) in obj.properties {
                 let is_required = required.contains(&name);
+
                 let t = get_property_type_from_schema_refor(refor.unbox(), is_required);
-                r#struct.field(&format!("pub {}", &name.to_snek_case()), &t);
+                fields.insert(name.to_snek_case(), t);
+            }
+
+            Element::Struct {
+                name,
+                fields,
+                derives,
+                annotations,
             }
         }
-        Type::Array(a) => {
-            scope.raw(&format!("pub type {} = {};", name, gen_array_type(a)));
-        }
+
+        Type::Array(a) => Element::Alias(name, gen_array_type(a)),
+
         t => {
             println!("#{:#?}", t);
             unreachable!();
@@ -224,27 +273,24 @@ fn generate_struct(
 }
 
 fn generate_enum(
-    scope: &mut Scope,
     name: String,
     types: Vec<ReferenceOr<Schema>>,
-    derivatives: Option<&[&str]>,
-    annotations: Option<&[&str]>,
-) {
-    let mut derivs = vec!["Debug"];
-    if let Some(derivatives) = derivatives {
-        derivs.extend(derivatives);
-    }
-    scope.raw(&format!("#[derive({})]", derivs.join(", ")));
+    mut derives: HashSet<String>,
+    annotations: HashSet<String>,
+) -> Element {
+    derives.insert("Debug".to_owned());
 
-    if let Some(annotations) = annotations {
-        for annotation in annotations {
-            scope.raw(annotation);
-        }
-    }
-    let r#enum = scope.new_enum(&name).vis("pub");
+    let mut variants = HashSet::new();
 
     for t in types.into_iter() {
         let t = get_property_type_from_schema_refor(t, true);
-        r#enum.new_variant(&t).tuple(&t);
+        variants.insert(t);
+    }
+
+    Element::Enum {
+        name,
+        variants,
+        derives,
+        annotations,
     }
 }

@@ -18,6 +18,8 @@ pub fn generate<P1: AsRef<std::path::Path>, P2: AsRef<std::path::Path>>(
     imports: Option<&[(&str, &str)]>,
     annotations: Option<&[&str]>,
 ) -> Result<(), GenError> {
+    use std::collections::HashSet;
+
     let schema_filename = schema_filename.as_ref();
     let data = std::fs::read_to_string(schema_filename)?;
     let oapi: OpenAPI = match schema_filename.extension().map(|s| s.to_str().unwrap()) {
@@ -25,8 +27,19 @@ pub fn generate<P1: AsRef<std::path::Path>, P2: AsRef<std::path::Path>>(
         Some("yaml") | Some("yml") => serde_yaml::from_str(&data)?,
         o => return Err(GenError::WrongFileExtension(o.map(|s| s.to_owned()))),
     };
+
+    let derives = match derivatives {
+        Some(d) => HashSet::from_iter(d.to_vec().into_iter().map(|v| v.to_owned())),
+        None => HashSet::new(),
+    };
+
+    let annotations = match annotations {
+        Some(a) => HashSet::from_iter(a.to_vec().into_iter().map(|v| v.to_owned())),
+        None => HashSet::new(),
+    };
+
     let schemas_map = parse::parse_schema(oapi);
-    let resp = generate::generate(schemas_map, derivatives, imports, annotations);
+    let resp = generate::generate(schemas_map, derives, imports, annotations);
     std::fs::write(output_filename, resp)?;
     Ok(())
 }
