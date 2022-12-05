@@ -222,7 +222,7 @@ fn get_property_type_from_schema_refor(refor: ReferenceOr<Schema>, is_required: 
 }
 
 fn gen_object_type(_: ObjectType) -> String {
-    String::new()
+    todo!("missing object definition")
 }
 
 fn gen_array_type(a: ArrayType) -> String {
